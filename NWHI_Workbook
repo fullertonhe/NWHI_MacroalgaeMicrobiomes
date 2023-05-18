@@ -1,0 +1,600 @@
+#NWHI workbook
+
+library("dada2")
+library("phyloseq")
+library("Biostrings")
+library("DECIPHER")
+library("DESeq2)
+library("vegan")
+library("ggplot2")
+library("dendextend")
+library("tidyr")
+library("viridis")
+library("reshape")
+library("igraph")
+library("ggraph")
+library("ggplot2")
+library("devtools")
+library("digest")
+library("microbiome")
+library("devtools")
+library("eulerr")
+
+# Primers were removed using CutAdapt
+# Quality control & DADA2 as described here
+# https://astrobiomike.github.io/amplicon/dada2_workflow_ex
+# this was performed per MiSeq run
+
+
+forward_reads <- paste0(samples, "_R1_trimmed.fq.gz")
+reverse_reads <- paste0(samples, "_R2_trimmed.fq.gz")
+filtered_forward_reads <- paste0(samples, "_R1_filtered.fq.gz")
+filtered_reverse_reads <- paste0(samples, "_R2_filtered.fq.gz")
+plotQualityProfile(forward_reads)
+plotQualityProfile(reverse_reads)
+
+filtered_out <- filterAndTrim(forward_reads, filtered_forward_reads,
+                              reverse_reads, filtered_reverse_reads, maxEE=c(2,2),
+                              truncQ=2, rm.phix=TRUE, minLen=175, truncLen=c(260,235))
+                              
+plotQualityProfile(filtered_reverse_reads[17:20])
+err_forward_reads <- learnErrors(filtered_forward_reads, multithread=TRUE)
+err_reverse_reads <- learnErrors(filtered_reverse_reads, multithread=TRUE)
+
+plotErrors(err_forward_reads, nominalQ=TRUE)
+plotErrors(err_reverse_reads, nominalQ=TRUE)
+
+derep_forward <- derepFastq(filtered_forward_reads, verbose=TRUE)
+names(derep_forward) <- samples 
+derep_reverse <- derepFastq(filtered_reverse_reads, verbose=TRUE)
+names(derep_reverse) <- samples
+
+dada_forward <- dada(derep_forward, err=err_forward_reads, pool="pseudo", multithread=T)
+dada_reverse <- dada(derep_reverse, err=err_reverse_reads, pool="pseudo", multithread=T) 
+
+merged_amplicons <- mergePairs(dada_forward, derep_forward, dada_reverse,
+                               derep_reverse, trimOverhang=TRUE, minOverlap=56)
+
+seqtab <- makeSequenceTable(merged_amplicons)
+class(seqtab) 
+dim(seqtab) 
+write.table(seqtab, file = "seqtab.csv", sep = ",")
+saveRDS(seqtab, "seqtab1.rds")
+
+
+## Merging of MiSeq Runs as documented here: https://benjjneb.github.io/dada2/bigdata.html
+
+NWHI1 <- readRDS("seqtab1.rds")
+NWHI2 <- readRDS("seqtab2.rds")
+NWHI3 <- readRDS("seqtab3.rds")
+st.all <- mergeSequenceTables(NWHI1, NWHI2, NWHI3)
+
+## Remove chimeras
+seqtab <- removeBimeraDenovo(st.all, method="consensus", multithread=TRUE, verbose= TRUE)
+sum(seqtab)/sum(st.all) 
+
+## Assigning taxonomy
+SILVA_SSU_r138_2019 <- read.table("SILVA_SSU_r138_2019.RData", quote="\"")
+View(SILVA_SSU_r138_2019)
+
+dna <- DNAStringSet(getSequences(seqtab))
+load("SILVA_SSU_r138_2019.RData")
+tax_info <- IdTaxa(dna, trainingSet, strand="both", processors=NULL)
+
+tax <- assignTaxonomy(seqtab, "/silva_nr_v128_train_set.fa.gz", multithread=TRUE)
+# Write to disk
+saveRDS(seqtab, "seqtab_final.rds") 
+saveRDS(tax, "tax_final.rds") 
+
+
+# Following https://astrobiomike.github.io/amplicon/dada2_workflow_ex for more processing
+
+asv_fasta <- c(rbind(asv_headers, asv_seqs))
+write(asv_fasta, "ASVs.fa")
+
+## Count table
+asv_tab <- t(seqtab)
+row.names(asv_tab) <- sub(">", "", asv_headers)
+write.table(asv_tab, "ASVs_counts.tsv", sep="\t", quote=F, col.names=NA)
+View(asv_tab)
+
+## Taxanomic table
+ranks <- c("domain", "phylum", "class", "order", "family", "genus", "species")
+asv_tax <- t(sapply(tax_info, function(x) {
+  m <- match(ranks, x$rank)
+  taxa <- x$taxon[m]
+  taxa[startsWith(taxa, "unclassified_")] <- NA
+  taxa
+}))
+colnames(asv_tax) <- ranks
+rownames(asv_tax) <- gsub(pattern=">", replacement="", x=asv_headers)
+
+write.table(asv_tax, "ASVs_taxonomy.tsv", sep = "\t", quote=F, col.names=NA)
+
+## Re-reading in our data
+
+write(asv_fasta, "ASV.fa")
+write.table(asv_tab, "ASVs_counts.tsv",
+            sep="\t", quote=F, col.names=NA)
+write.table(asv_tax, "ASVs_taxonomy.tsv",
+            sep="\t", quote=F, col.names=NA)
+
+
+count_tab<- read.table("ASVs_counts.tsv", header=T, row.names=1,
+                       check.names=F, sep="\t")
+View(count_tab)
+
+tax_tab <- as.matrix(read.table("ASVs_taxonomy.tsv", header=T,
+                                row.names=1, check.names=F, sep="\t"))
+View(tax_tab)
+
+sample_info_tab <- read.table("sample_info_tab.csv", header=T, row.names=, check.names=F, sep="\t")
+
+View(sample_info_tab)
+
+rarecurve(t(count_tab), step=100, col=sample_info_tab$Color,lwd=2, ylab="ASVs", label= FALSE)
+abline(v=(min(rowSums(t(count_tab)))))
+
+ASV_physeq <- phyloseq(count_tab_phy, tax_tab_phy, sample_info_tab_phy)
+View(ASV_physeq)
+Colors<- c("Rhodophyta" = "lightcoral", "Chlorophyta"= "darkolivegreen4", "Ochrophyta"= "tan4", "Water"="lightskyblue")
+
+estimate_richness(ASV_physeq, split = TRUE, measures = c("Observed", "Chao1", "ACE", "Shannon", "Simpson", "InvSimpson", "Fisher"))
+diversity<- as.data.frame(estimate_richness(ASV_physeq, split = TRUE, measures = c("Observed", "Chao1", "ACE", "Shannon", "Simpson", "InvSimpson", "Fisher")))
+View(diversity)
+write.table(diversity, file = "NWHI_diversity.csv", sep = ",")
+
+plot_richness(ASV_physeq, x="Identification", color= "Phylum", measures=c("Observed", "Chao1", "ACE", "Shannon", "Simpson", "InvSimpson", "Fisher")) + geom_point(size=3.0) + theme(legend.title = element_blank()) + scale_color_manual(values=Colors)
+plot_richness(ASV_physeq, x="Island", color="Family", shape= "Depth", measures=c("Chao1", "Shannon")) + 
+  scale_color_manual(values=Colors) +
+  geom_point(size=2.5) + theme_bw()+
+  theme(legend.title = element_blank())
+plot_richness(ASV_physeq_MHI, x="Native_Invasive", measures=c("Chao1","Shannon"), color="Family") + scale_color_manual(values=Colors) + theme_bw()
+
+deseq_counts <- DESeqDataSetFromMatrix(count_tab, colData=sample_info_tab, design= ~ 1)
+deseq_counts_vst <- varianceStabilizingTransformation(deseq_counts)
+
+vst_trans_count_tab<- assay(deseq_counts_vst)
+
+euc_dist <- dist(t(vst_trans_count_tab))
+
+## Hierarchical Clustering
+euc_dend <- as.dendrogram(euc_clust, hang=0.1) 
+View(euc_dend)
+dend_cols <- as.character(sample_info_tab$Color[order.dendrogram(euc_dend)])
+labels_colors(euc_dend) <- dend_cols
+plot(euc_dend, ylab="VST Euc. dist.", main="Hierarchical Clustering at Manawai, NWHI")
+
+ggraph(euc_dend, layout = 'dendrogram')+   geom_edge_diagonal() +
+geom_node_text(aes( label=sample_info_tab$Identification, filter=leaf) , angle=90 , hjust=1, nudge_y = -0.04) +
+  geom_node_point(aes(filter=leaf) , alpha=0.6) +
+  ylim(-.5, NA)
+
+vst_count_phy <- otu_table(vst_trans_count_tab, taxa_are_rows=T)
+sample_info_tab_phy <- sample_data(sample_info_tab)
+sample_names(sample_info_tab_phy) <- sample_names(vst_count_phy)
+
+vst_physeq <- phyloseq(sample_info_tab_phy, vst_count_phy)
+
+source_url("https://raw.github.com/low-decarie/FAAV/master/r/stat-ellipse.R")    
+qplot(data=sample_info_tab, x=vst_physeq, y=vst_pcoa, colour="Color")+stat_ellipse()
+
+
+## Generating and visualizing the PCoA with phyloseq
+vst_pcoa <- ordinate(vst_physeq, method="MDS", distance="euclidean")
+eigen_vals <- vst_pcoa$values$Eigenvalues # allows us to scale the axes according to their magnitude of separating apart the samples
+vst_pcoa
+
+plot_ordination(vst_physeq, vst_pcoa, color="Color") + 
+  geom_point(size=1) + labs(col="sample_info_tab_MHI$Phylum") + geom_text(aes(label=sample_info_tab$Identification), hjust=0.3, vjust=-0.4)+ 
+  ggtitle("PCoA at NWHI") + theme_bw() +
+  scale_color_manual(values=unique(sample_info_tab$Color[order(sample_info_tab$Color)])) + theme(legend.position="none") +
+  stat_ellipse(type = "norm", linetype= 1)
+
+## PCoA based on invasive vs. native:
+NI_Colors<- c("Native"= "chartreuse4", "Invasive"= "coral4", "na"= "cornflowerblue")
+plot_ordination(vst_physeq, vst_pcoa, color="Invasive_Native") + 
+  geom_point(size=1) + labs(col="NI_Colors") + geom_text(aes(label=rownames(sample_info_tab), hjust=0.3, vjust=-0.4)) + 
+  ggtitle("PCoA of Natives vs. Invasives at NWHI") + theme_bw() + scale_color_manual(values=NI_Colors)
+
+scale_color_manual(values=unique(sample_info_tab$Color[order(sample_info_tab$Color)])) + theme(legend.position="none") 
+
+## Alpha diversity and rarefaction curves
+rarecurve(t(count_tab), step=100, col=sample_info_tab$Species_Color,lwd=2, ylab="ASVs", label= FALSE)
+abline(v=(min(rowSums(t(count_tab)))))
+
+## Richness and diversity estimates; creating a phyloseq object using un-transformed data
+diversity(count_tab)
+
+identical(count_tab_phy,sample_info_tab_phy)
+vector1 <- rownames(sample_info_tab_phy)
+vector2 <- rownames(count_tab_phy)
+vector1 == vector2
+count_tab_phy <- otu_table(count_tab, taxa_are_rows=T)
+count_tab_phy
+tax_tab
+count_tab
+tax_tab_phy <- tax_table(tax_tab)
+tax_tab_phy
+sample_info_tab_phy
+View(otu_table)
+ASV_physeq <- phyloseq(count_tab_phy, tax_tab_phy, sample_info_tab_phy)
+ASV_physeq<- phyloseq(otu_table(count_tab_phy), sample_data(sample_info_tab_phy), tax_table(tax_tab_phy))
+ASV_physeq
+estimate_richness(ASV_physeq, split = TRUE, measures = c("Observed", "Chao1", "ACE", "Shannon", "Simpson", "InvSimpson", "Fisher"))
+diversity<- as.data.frame(estimate_richness(ASV_physeq, split = TRUE, measures = c("Observed", "Chao1", "ACE", "Shannon", "Simpson", "InvSimpson", "Fisher")))
+write.table(diversity, file = "NWHI_diversity.csv", sep = ",")
+
+library("ape")
+random_tree<- rtree(ntaxa(ASV_physeq), rooted=TRUE, tip.label=taxa_names(ASV_physeq))
+physeq1<- merge_phyloseq(ASV_physeq, random_tree)
+ps_rare <- phyloseq::rarefy_even_depth(physeq1, rngseed = 123, replace = TRUE,trimOTUs=TRUE)
+#picante::PD, calculate Faith's Phylogenetic Diversity
+PD<- picante::pd(samp = data.frame(t(data.frame(phyloseq::otu_table(ps_rare)))), tree = phyloseq::phy_tree(ps_rare))[, 1]
+diversity$PD<-PD
+adiv=diversity
+adiv[,c(2:5)]=NULL
+adiv[,c(4:5)]=NULL
+head(adiv)
+write.table(adiv, file = "NWHI_adiv.csv", sep = ",")
+geom_jitter(aes(color = Identification), height = 0, width = .2) +
+  diveplot <- diveplot + geom_boxplot(data = diveplot$data, aes(x = Zone, y = value, color = NULL),alpha = 0.1)
+
+divplot<-diversity %>%
+  gather(key = metric, value = value, c("Observed", "Shannon", "Simpson", "PD")) %>%
+  mutate(metric = factor(metric, levels = c("Observed", "Shannon", "Simpson" ,"PD"))) %>%
+  ggplot(aes(x = Phylum, y = value))+
+  geom_jitter(aes(color=Identification), height = 0, width = .4, size=3) +
+  scale_color_manual(values=c("Distromium sp."="antiquewhite4", "Dudresnaya hawaiiensis"="violetred1","Halimeda discoidea"= "olivedrab4", "Halimeda velasquezii"="darkolivegreen3", "Microdictyon setchellianum"= "darkslategrey", "Neomeris annulate" ="seagreen3", "Padina moffitiana"="burlywood4","Padina sp."="goldenrod3","Umbraulva kaloakulau"= "yellow3", "Dictyotaceylanica"="tan","Galaxaura indica"="brown3","Gracilaria sp."="darksalmon","Laurencia dendroidea"="orchid3","Symphyocladia sp."="orangered1","Sporochnus dotyi"="indianred4", "Chondria tumulosa" = "red", "Seawater"="steelblue3"))+
+  geom_boxplot(outlier.color = NA,fill= NA) + 
+  labs(x = "", y = "") +
+  facet_wrap(~ metric, scales = "free") +
+  theme_bw()+theme(legend.text = element_text(size = 16, colour ="black", face = "italic"), 
+                   legend.title = element_text(size = 24, face = "bold"),
+                   axis.text.x = element_text(colour = "black", size = 14, face = "bold", angle = -40, vjust = 0.3, hjust = 0), 
+                   axis.text.y = element_text(colour = "black", face="bold", size = 16))
+divplot
+
+## Alpha diversity pair-wise comparisons and ANOVA stats
+
+my_comparisons <- list( c("Ochrophyta", "Rhodophyta"), c("Ochrophyta", "Chlorophyta"), c("Rhodophyta", "Chlorophyta"), c("Rhodophyta", "Seawater"),c("Seawater", "Chlorophyta"),c("Seawater", "Ochrophyta") )
+ggboxplot<-ggboxplot(NWHI_adiv, x = "Phylum", y = "PD",
+          color = "Phylum", palette = "jcol")+ 
+  stat_compare_means(comparisons = my_comparisons)+ stat_compare_means(label.y = 10000)                    
+
+ggboxplot(NWHI_adiv, x = "Phylum", y = "PD",color = "Phylum")+
+stat_compare_means(method = "anova", label.y = 40)+      # Add global p-value
+  stat_compare_means(label = "p.signif", method = "t.test", ref.group = "0.5") 
+
+obsboxplot<-ggboxplot(NWHI_adiv, x = "Phylum", y = "Observed",
+                     color = "Phylum", palette = "jcol")+ 
+  stat_compare_means(comparisons = my_comparisons)+ stat_compare_means(label.y = 10000)
+
+simpboxplot<-ggboxplot(NWHI_adiv, x = "Phylum", y = "Simpson",
+                     color = "Phylum", palette = "jcol")+ 
+  stat_compare_means(comparisons = my_comparisons)+ stat_compare_means(label.y = 1)  
+
+shanboxplot<-ggboxplot(NWHI_adiv, x = "Phylum", y = "Shannon",
+                     color = "Phylum", palette = "jcol")+ 
+  stat_compare_means(comparisons = my_comparisons)+ stat_compare_means(label.y = 1)  
+
+# Transform data to proportions as appropriate for Bray-Curtis distances
+ASV_physeq.prop <- transform_sample_counts(ASV_physeq, function(otu) otu/sum(otu))
+View(ASV_physeq.prop)
+ord.nmds.bray <- ordinate(ASV_physeq.prop, method="NMDS", color= "Colors", distance="bray")
+FASV_physeqnmds<- plot_ordination(ASV_physeq.prop, ord.nmds.bray, color= "Phylum", shape= "Invasive_Native", title="Stress: 0.209")
+FASV_physeqnmds+ scale_color_manual(values=Colors) + theme_bw() + geom_point(size=3.0) + stat_ellipse(type = "norm", linetype= 1)
+View(sample_info_tab)
+#nmds + geom_polygon(aes(fill=Family)) + geom_point(size=5) + ggtitle("samples")
+top20 <- names(sort(taxa_sums(ASV_physeq), decreasing=TRUE))[1:50]
+ASV_physeq.top20 <- transform_sample_counts(ASV_physeq, function(OTU) OTU/sum(OTU))
+ASV_physeq.top20 <- prune_taxa(top20, ASV_physeq.top20)
+plot_bar(ASV_physeq.top20, x="Depth", fill="") + facet_wrap(~Family, scales="free_x") + theme_bw()
+
+
+## Taxonomic Summaries
+
+phyla_counts_tab <- otu_table(tax_glom(ASV_physeq, taxrank="phylum")) 
+phyla_tax_vec <- as.vector(tax_table(tax_glom(ASV_physeq, taxrank="phylum"))[,2]) 
+rownames(phyla_counts_tab) <- as.vector(phyla_tax_vec)
+unclassified_tax_counts <- colSums(count_tab) - colSums(phyla_counts_tab)
+phyla_and_unidentified_counts_tab <- rbind(phyla_counts_tab, "Unclassified"=unclassified_tax_counts)
+class_counts_tab <- otu_table(tax_glom(ASV_physeq, taxrank="class")) 
+fam_ct <- otu_table(tax_glom(ASV_physeq, taxrank="family")) 
+fam_ct
+class_counts_tab
+data.frame(class_counts_tab)
+# making a table that holds the phylum and class level info
+class_tax_phy_tab <- tax_table(tax_glom(ASV_physeq, taxrank="class")) 
+order_tax_phy_tab <- tax_table(tax_glom(ASV_physeq, taxrank="order")) 
+fam_tax_phy_tab <- tax_table(tax_glom(ASV_physeq, taxrank="family")) 
+
+phy_tmp_vec <- order_tax_phy_tab[,2]
+class_tmp_vec <- order_tax_phy_tab[,3]
+order_tmp_vec <- order_tax_phy_tab[,4]
+fam_tmp_vec<- order_tax_phy_tab[,5]
+rows_tmp_orders <- row.names(order_tax_phy_tab)
+co_tax_tab <- data.frame("phylum"=phy_tmp_vec, "class"=class_tmp_vec, "order"=order_tmp_vec, row.names = rows_tmp_orders)
+cof_tax_tab <- data.frame("phylum"=phy_tmp_vec, "class"=class_tmp_vec, "order"=order_tmp_vec, "family"=fam_tmp_vec, row.names = rows_tmp_orders)
+
+# Generation of proportions table for summarizing:
+major_taxa_proportions_tab <- apply(fam_ct, 2, function(x) x/sum(x)*100)
+dim(major_taxa_proportions_tab)
+temp_filt_major_taxa_proportions_tab <- data.frame(major_taxa_proportions_tab[apply(major_taxa_proportions_tab, 1, max) > 1, ])
+dim(temp_filt_major_taxa_proportions_tab) 
+filtered_proportions <- colSums(major_taxa_proportions_tab) - colSums(temp_filt_major_taxa_proportions_tab)
+filt_major_taxa_proportions_tab <- rbind(temp_filt_major_taxa_proportions_tab, "Other"=filtered_proportions)
+
+# Make a copy of our table that's safe for manipulating:
+filt_major_taxa_proportions_tab_for_plot <- filt_major_taxa_proportions_tab
+filt_major_taxa_proportions_tab_for_plot
+filt_major_taxa_proportions_tab_for_plot$Major_Taxa <- row.names(filt_major_taxa_proportions_tab_for_plot)
+filt_major_taxa_proportions_tab_for_plot.g <- gather(filt_major_taxa_proportions_tab_for_plot, Sample, Proportion, -Major_Taxa)
+
+head(filt_major_taxa_proportions_tab_for_plot.g)
+head(filt_major_taxa_proportions_tab_for_plot)
+
+sample_info_for_merge<-data.frame("Sample"=sample_info_tab$Sample_Label, "Phylum"=sample_info_tab$Phylum, "Depth"=sample_info_tab$Depth, "Zone"=sample_info_tab$Zone,"Color"=sample_info_tab$Color, "Identification"=sample_info_tab$Identification, "Invasive_Native"=sample_info_tab$Invasive_Native,"Calcification"=sample_info_tab$Calcification,"Morphology"=sample_info_tab$"Morphological_Complexity", tringsAsFactors=F)
+filt_major_taxa_proportions_tab_for_plot.g2 <- merge(filt_major_taxa_proportions_tab_for_plot.g, sample_info_tab)
+filt_major_taxa_proportions_tab_for_plot.g2 <-data.frame(filt_major_taxa_proportions_tab_for_plot.g2)
+ggplot(filt_major_taxa_proportions_tab_for_plot.g2, aes(x=Sample, y=Proportion, fill=Major_Taxa)) +
+  geom_bar(width=0.6, stat="identity") +
+  theme_bw() +
+  theme(axis.text.x=element_text(angle=90, vjust=0.4, hjust=1), legend.title=element_blank()) +
+  labs(x="Sample", y="% of 16S rRNA gene copies recovered", title="All samples")
+
+algae_sample_IDs <- row.names(sample_info_tab)[sample_info_tab$Identification != "Seawater"]
+green_sample_IDs <- row.names(sample_info_tab)[sample_info_tab$Phylum == "Chlorophyta"]
+brown_sample_IDs <- row.names(sample_info_tab)[sample_info_tab$Phylum == "Ochrophyta"]
+red_sample_IDs <- row.names(sample_info_tab)[sample_info_tab$Phylum == "Rhodophyta"]
+water_sample_IDs <- row.names(sample_info_tab)[sample_info_tab$Phylum == "Seawater"]
+
+algae_only_tab_for_plot.g <- filt_major_taxa_proportions_tab_for_plot.g2[filt_major_taxa_proportions_tab_for_plot.g2$Sample_label %in% algae_sample_IDs, ]
+green_only_tab_for_plot.g <- filt_major_taxa_proportions_tab_for_plot.g2[filt_major_taxa_proportions_tab_for_plot.g2$Sample_label %in% green_sample_IDs, ]
+brown_only_tab_for_plot.g <- filt_major_taxa_proportions_tab_for_plot.g2[filt_major_taxa_proportions_tab_for_plot.g2$Sample_label %in% brown_sample_IDs, ]
+red_only_tab_for_plot.g <- filt_major_taxa_proportions_tab_for_plot.g2[filt_major_taxa_proportions_tab_for_plot.g2$Sample_label %in% red_sample_IDs, ]
+
+## Betadisper and permutational ANOVA
+anova(betadisper(euc_dist, sample_info_tab$Identification)) 
+algae_sample_IDs <- row.names(sample_info_tab)[sample_info_tab$Identification != "Seawater" ]
+algae_euc_dist <- dist(t(vst_trans_count_tab[ , colnames(vst_trans_count_tab) %in% algae_sample_IDs]))
+micro_sample_IDs <- row.names(sample_info_tab)[sample_info_tab$Identification == "Microdictyon setchellianum"]
+micro_euc_dist <- dist(t(vst_trans_count_tab[ , colnames(vst_trans_count_tab) %in% micro_sample_IDs]))
+micro_sample_info_tab <- sample_info_tab[row.names(sample_info_tab) %in% micro_sample_IDs, ]
+row.names(micro_sample_info_tab)<- micro_sample_info_tab$Old_Sample_Label
+anova(betadisper(micro_euc_dist, micro_sample_info_tab$Depth)) 
+adonis2(micro_euc_dist~micro_sample_info_tab$Depth) 
+mh_sample_IDs <- row.names(sample_info_tab)[sample_info_tab$Identification == "Microdictyon setchellianum" |sample_info_tab$Identification == "Halimeda velasquezii" |sample_info_tab$Identification == "Halimeda discoidea"]
+mh_euc_dist <- dist(t(vst_trans_count_tab[ , colnames(vst_trans_count_tab) %in% mh_sample_IDs]))
+mh_sample_info_tab <- sample_info_tab[row.names(sample_info_tab) %in% mh_sample_IDs, ]
+row.names(mh_sample_info_tab)<- mh_sample_info_tab$Old_Sample_Label
+
+mh_vst_count_phy <- otu_table(vst_trans_count_tab[, colnames(vst_trans_count_tab) %in% mh_sample_IDs], taxa_are_rows=T)
+mh_sample_info_tab_phy <- sample_data(mh_sample_info_tab)
+row.names(mh_sample_info_tab_phy)<- mh_sample_info_tab_phy$Old_Sample_Label
+mh_vst_physeq <- phyloseq(mh_vst_count_phy, mh_sample_info_tab_phy)
+View(mh_vst_physeq)
+mh_count_phy <- otu_table(count_tab[, colnames(count_tab) %in% mh_sample_IDs], taxa_are_rows=T)
+mh_count_physeq <- phyloseq(mh_count_phy, mh_sample_info_tab_phy)
+mh_sample_info_tab_phy <- sample_data(mh_sample_info_tab)
+
+hali_sample_IDs <- row.names(sample_info_tab)[sample_info_tab$Identification == "Halimeda discoidea"| sample_info_tab$Identification == "Halimeda velasquezii" ]
+hali_euc_dist <- dist(t(vst_trans_count_tab[ , colnames(vst_trans_count_tab) %in% hali_sample_IDs]))
+hali_sample_info_tab <- sample_info_tab[row.names(sample_info_tab) %in% hali_sample_IDs, ]
+row.names(hali_sample_info_tab)<- hali_sample_info_tab$Old_Sample_Label
+
+hali_vst_count_phy <- otu_table(vst_trans_count_tab[, colnames(vst_trans_count_tab) %in% hali_sample_IDs], taxa_are_rows=T)
+hali_sample_info_tab_phy <- sample_data(hali_sample_info_tab)
+row.names(hali_sample_info_tab_phy)<- hali_sample_info_tab_phy$Old_Sample_Label
+hali_vst_physeq <- phyloseq(hali_vst_count_phy, hali_sample_info_tab_phy)
+
+micro_sample_IDs <- row.names(sample_info_tab)[sample_info_tab$Identification == "Microdictyon setchellianum"]
+micro_euc_dist <- dist(t(vst_trans_count_tab[ , colnames(vst_trans_count_tab) %in% micro_sample_IDs]))
+micro_sample_info_tab <- sample_info_tab[row.names(sample_info_tab) %in% micro_sample_IDs, ]
+row.names(micro_sample_info_tab)<- micro_sample_info_tab$Old_Sample_Label
+micro_vst_count_phy <- otu_table(vst_trans_count_tab[, colnames(vst_trans_count_tab) %in% micro_sample_IDs], taxa_are_rows=T)
+micro_sample_info_tab_phy <- sample_data(micro_sample_info_tab)
+row.names(micro_sample_info_tab_phy)<- micro_sample_info_tab_phy$Old_Sample_Label
+micro_vst_physeq <- phyloseq(micro_vst_count_phy, micro_sample_info_tab_phy)
+
+# Halimeda discoidea
+halidis_sample_IDs <- row.names(sample_info_tab)[sample_info_tab$Identification == "Halimeda discoidea"]
+halidis_sample_IDs
+halidis_euc_dist <- dist(t(vst_trans_count_tab[ , colnames(vst_trans_count_tab) %in% halidis_sample_IDs]))
+halidis_euc_dist
+halidis_sample_info_tab <- sample_info_tab[row.names(sample_info_tab) %in% halidis_sample_IDs, ]
+row.names(halidis_sample_info_tab)<- halidis_sample_info_tab$Old_Sample_Label
+
+# Halimeda velasquezii
+halivel_sample_IDs <- row.names(sample_info_tab)[sample_info_tab$Identification =="Halimeda velasquezii" ]
+halivel_sample_IDs
+halivel_euc_dist <- dist(t(vst_trans_count_tab[ , colnames(vst_trans_count_tab) %in% halivel_sample_IDs]))
+halivel_euc_dist
+halivel_sample_info_tab <- sample_info_tab[row.names(sample_info_tab) %in% halivel_sample_IDs, ]
+row.names(halivel_sample_info_tab)<- halivel_sample_info_tab$Old_Sample_Label
+
+halitwo_sample_IDs <- row.names(hali_sample_info_tab)[hali_sample_info_tab$Depth == "22.5"]
+halitwo_sample_IDs
+halitwo_euc_dist <- dist(t(vst_trans_count_tab[ , colnames(vst_trans_count_tab) %in% halitwo_sample_IDs]))
+halitwo_euc_dist
+halitwo_sample_info_tab <- sample_info_tab[row.names(sample_info_tab) %in% halitwo_sample_IDs, ]
+row.names(halitwo_sample_info_tab)<- halitwo_sample_info_tab$Old_Sample_Label
+halitwo_vst_count_phy <- otu_table(vst_trans_count_tab[, colnames(vst_trans_count_tab) %in% halitwo_sample_IDs], taxa_are_rows=T)
+halitwo_sample_info_tab_phy <- sample_data(halitwo_sample_info_tab)
+row.names(halitwo_sample_info_tab_phy)<- halitwo_sample_info_tab_phy$Old_Sample_Label
+halitwo_vst_physeq <- phyloseq(halitwo_vst_count_phy, halitwo_sample_info_tab_phy)
+View(halitwo_vst_physeq)
+halitwo_vst_pcoa <- ordinate(halitwo_vst_physeq, method="NMDS", distance="euclidean")
+
+# 2m depth:
+twomsampleIDs <- row.names(sample_info_tab)[sample_info_tab$Depth == "2"]
+twom_euc_dist <- dist(t(vst_trans_count_tab[ , colnames(vst_trans_count_tab) %in% twomsampleIDs]))
+twom_sample_info_tab <- sample_info_tab[row.names(sample_info_tab) %in% twomsampleIDs, ]
+row.names(twom_sample_info_tab)<- twom_sample_info_tab$Old_Sample_Label
+
+# 2m depth for just the reds:
+twomredsampleIDs <- row.names(sample_info_tab)[sample_info_tab$Depth == "2" & sample_info_tab$Phylum == "Rhodophyta"]
+twomred_euc_dist <- dist(t(vst_trans_count_tab[ , colnames(vst_trans_count_tab) %in% twomredsampleIDs]))
+twomred_sample_info_tab <- sample_info_tab[row.names(sample_info_tab) %in% twomredsampleIDs, ]
+row.names(twomred_sample_info_tab)<- twomred_sample_info_tab$Old_Sample_Label
+
+# Example of the tests run on full and subset data frames for Halimeda, Microdictyon, 2m depth, separate algal phylua, and only algae based on different parameters: 
+anova(betadisper(hali_euc_dist, hali_sample_info_tab$Zone)) 
+adonis2(hali_euc_dist~hali_sample_info_tab$Zone) 
+#
+anova(betadisper(micro_euc_dist, micro_sample_info_tab$Zone))# Need to run an ANOSIM instead if significant here.
+anosim(x=micro_euc_dist, grouping = micro_sample_info_tab$Zone, permutations = 9999, distance = "bray") 
+#
+
+## NMDS 
+# NMDS for all samples
+
+nmdszone<- plot_ordination(ASV_physeq.prop, ord.nmds.bray, color= "Phylum",shape= "Zone",title="Stress: 0.2098648")
+
+nmdszone+ stat_ellipse()
+nmdsphyzone<-nmdszone+scale_color_manual(values= c('Chlorophyta'="darkolivegreen4", 'Ochrophyta'="tan4", 'Rhodophyta'="indianred", 'Seawater'="lightskyblue")) + theme_bw() + geom_point(size = 1) +
+  guides(color = guide_legend(override.aes = list(size =1)))+ stat_ellipse(level=0.95, type="norm", linetype=1,aes(group = Zone))
+nmdsphyzone+geom_point(size=4) +theme(legend.key=element_blank(), 
+                                      axis.text.x = element_text(colour = "black", size = 18), 
+                                      axis.text.y = element_text(colour = "black", size = 18), 
+                                      axis.title.x = element_text(size = 18, face = "bold"),
+                                      axis.title.y = element_text(size = 18, face = "bold"),
+                                      legend.text = element_text(size = 18, colour ="black"), 
+                                      legend.title = element_text(size = 20, face = "bold"))
+# NMDS for the Halimeda 
+ASV_haliphyseq <- phyloseq(hali_count_phy, tax_tab_phy, hali_sample_info_tab_phy)
+ASV_haliphyseq.prop <- transform_sample_counts(ASV_haliphyseq, function(otu) otu/sum(otu))
+hali.ord.nmds.bray <- ordinate(ASV_haliphyseq.prop, method="NMDS", color= "Color", distance="bray")
+hali_physeqnmds<- plot_ordination(ASV_haliphyseq.prop, hali.ord.nmds.bray, color= "Zone",shape= "Identification",title="Stress: 0.0578")
+hali_physeqnmds
+halinmds<-hali_physeqnmds+scale_color_manual(values= c('Shallow Subtidal'="light blue", 'Subtidal'="blue", 'Mesophotic'="Dark blue")) + theme_bw() + geom_point(size = 3) +
+  guides(color = guide_legend(override.aes = list(size = 2)))+ geom_point(mapping=aes(shape=as.factor(Identification)))+
+  scale_shape_manual(values = c('Halimeda discoidea'=17, 'Halimeda velasquezii'=16)) + stat_ellipse(type = "norm", linetype=1,aes(group = Zone))
+
+halinmds+theme(legend.key=element_blank(), 
+           axis.text.x = element_text(colour = "black", size = 18), 
+           axis.text.y = element_text(colour = "black", size = 18), 
+           axis.title.x = element_text(size = 18, face = "bold"),
+           axis.title.y = element_text(size = 18, face = "bold"),
+           legend.text = element_text(size = 18, colour ="black", face= "italic"), 
+           legend.title = element_text(size = 20, face = "bold"))
+halinmdszone<- plot_ordination(ASV_haliphyseq.prop, hali.ord.nmds.bray, color= "Zone", shape= "Identification",title="Stress: 0.05779718")
+
+nmdshalizone<-halinmdszone+scale_color_manual(values= c('Chlorophyta'="darkolivegreen4", 'Ochrophyta'="tan4", 'Rhodophyta'="indianred", 'Seawater'="lightskyblue")) + theme_bw() + geom_point(size = 1) +
+  guides(color = guide_legend(override.aes = list(size =1)))+ stat_ellipse(level=0.95,type = "norm", linetype= 1)
+nmdshalizone+geom_point(size=4) +theme(legend.key=element_blank(), 
+                                      axis.text.x = element_text(colour = "black", size = 18), 
+                                      axis.text.y = element_text(colour = "black", size = 18), 
+                                      axis.title.x = element_text(size = 18, face = "bold"),
+                                      axis.title.y = element_text(size = 18, face = "bold"),
+                                      legend.text = element_text(size = 18, colour ="black"), 
+                                      legend.title = element_text(size = 20, face = "bold"))
+
+## NMDS for Microdictyon setchelliellum 
+ASV_microphyseq <- phyloseq(micro_count_phy, tax_tab_phy, micro_sample_info_tab_phy)
+ASV_microphyseq.prop <- transform_sample_counts(ASV_microphyseq, function(otu) otu/sum(otu))
+View(ASV_microphyseq.prop)
+micro.ord.nmds.bray <- ordinate(ASV_microphyseq.prop, method="NMDS", color= "Color", distance="bray")
+
+micro_physeqnmds<- plot_ordination(ASV_microphyseq.prop, micro.ord.nmds.bray, color= "Zone",title="Stress: 8.824634e-05 ")
+micronmds<-micro_physeqnmds+scale_color_manual(values= c('Shallow Subtidal'="light blue", 'Subtidal'="blue", 'Mesophotic'="Dark blue")) + theme_bw() + geom_point(size = 3) +
+  guides(color = guide_legend(override.aes = list(size = 2)))+ geom_point(mapping=aes(shape=as.factor(Identification)))+
+  stat_ellipse(level=0.95, type="norm", linetype=1,aes(group = Zone))
+micronmds
+micronmds+theme(legend.key=element_blank(), 
+               axis.text.x = element_text(colour = "black", size = 18), 
+               axis.text.y = element_text(colour = "black", size = 18), 
+               axis.title.x = element_text(size = 18, face = "bold"),
+               axis.title.y = element_text(size = 18, face = "bold"),
+               legend.text = element_text(size = 18, colour ="black"), 
+               legend.title = element_text(size = 20, face = "bold"))
+micronmdszone<- plot_ordination(ASV_microphyseq.prop, micro.ord.nmds.bray, color= "Zone", shape= "Identification",title="Stress: 0.05779718")
+
+nmdsmicrozone<-micronmdszone+scale_color_manual(values= c('Chlorophyta'="darkolivegreen4", 'Ochrophyta'="tan4", 'Rhodophyta'="indianred", 'Seawater'="lightskyblue")) + theme_bw() + geom_point(size = 1) +
+  guides(color = guide_legend(override.aes = list(size =1)))+ stat_ellipse(level=0.95, type="norm", linetype=1,aes(group = Zone))
+nmdshalizone+geom_point(size=4) +theme(legend.key=element_blank(), 
+                                       axis.text.x = element_text(colour = "black", size = 18), 
+                                       axis.text.y = element_text(colour = "black", size = 18), 
+                                       axis.title.x = element_text(size = 18, face = "bold"),
+                                       axis.title.y = element_text(size = 18, face = "bold"),
+                                       legend.text = element_text(size = 18, colour ="black"), 
+                                       legend.title = element_text(size = 20, face = "bold"))
+
+microplot <- plot_ordination(micro_vst_physeq, micro_vst_pcoa, type="samples",color="Zone",shape="Location",title="Microbial Taxa Associated with M. setchellianum per Depth Zone")
+
+## NMDS for 2m
+p5<-p4 + theme_bw()+geom_point(size=7) + 
+  geom_point(shape = 2,size = 7,colour = "black") + theme(legend.text = element_text(face = "italic"))+ggtitle("Microbial Taxa Associated with Macroalgal Phylum per Depth Zone")+ scale_color_manual(values = newpal)
+p5 + facet_wrap(~Depth, 3)
+
+## Heat maps for each algal phylum
+
+# Green Algae:
+ASV_greenphyseq_class <- subset_taxa(ASV_greenphyseq_comp, class!="Unknown")
+
+ASV_greenphyseq_com_rel <- microbiome::transform(ASV_greenphyseq_comp, "compositional")
+
+ASV_greenphyseq_com_relabun <- plot_composition(ASV_greenphyseq_com_rel,
+                                           sample.sort = "Sample_Label",
+                                           x.label = "Sample_Label") 
+ASV_greenphyseq_com_relabun <- ASV_greenphyseq_com_relabun + theme(legend.position = "bottom") 
+ASV_greenphyseq_com_relabun <- ASV_greenphyseq_com_relabun + scale_fill_brewer("class", palette = "Paired") + theme_bw() 
+ASV_greenphyseq_com_relabun <-ASV_greenphyseq_com_relabun + theme(axis.text.x = element_text(angle = 90)) 
+ASV_greenphyseq_com_relabun <- ASV_greenphyseq_com_relabun + ggtitle("Relative abundance") + theme(legend.title = element_text(size = 18))
+
+greendata.com <- ASV_greenphyseq_com_relabun$data
+colnames(greendata.com)
+
+greenunk.heat <- ggplot(greendataunk.com, aes(x = Sample, y = Tax)) + geom_tile(aes(fill = Abundance)) 
+greenunk.heat <- greenunk.heat + theme(legend.key=element_blank(), 
+                                 axis.text.x = element_text(colour = "black", size = 14, face = "bold", angle = -40, vjust = 0.3, hjust = 0.5), 
+                                 axis.text.y = element_text(colour = "black", face="bold", size = 10), 
+                                 legend.text = element_text(size = 18, colour ="black", face = "bold"), 
+                                 legend.title = element_text(size = 20, face = "bold"), 
+                                 panel.background = element_blank(), panel.border = element_rect(colour = "black", fill = NA, size = 1.2), 
+                                 legend.position = "right")
+greenunk.heat
+
+# Red Algae:
+
+ASV_redphyseq_com_relunk <- microbiome::transform(ASV_redphyseq_class, "compositional")
+
+ASV_redphyseq_com_relabununk <- plot_composition(ASV_redphyseq_com_relunk,
+                                                   sample.sort = "Sample_Label",
+                                                   x.label = "Sample_Label")
+
+reddataunk.com <- ASV_redphyseq_com_relabununk$data
+colnames(reddataunk.com)
+
+redunk.heat <- ggplot(reddataunk.com, aes(x = Sample, y = Tax)) + geom_tile(aes(fill = Abundance)) 
+redunk.heat <- redunk.heat + theme(legend.key=element_blank(), 
+                                       axis.text.x = element_text(colour = "black", size = 14, face = "bold", angle = -40, vjust = 0.3, hjust = 0.5), 
+                                       axis.text.y = element_text(colour = "black", face="bold", size = 10), 
+                                       legend.text = element_text(size = 18, colour ="black", face = "bold"), 
+                                       legend.title = element_text(size = 20, face = "bold"), 
+                                       panel.background = element_blank(), panel.border = element_rect(colour = "black", fill = NA, size = 1.2), 
+                                       legend.position = "right")
+
+# Brown Algae: 
+brownunk.heat <- ggplot(browndataunk.com, aes(x = Sample, y = Tax)) + geom_tile(aes(fill = Abundance))
+
+brownunk.heat <- brownunk.heat + theme(legend.key=element_blank(), 
+                                   axis.text.x = element_text(colour = "black", size = 14, face = "bold", angle = -40, vjust = 0.3, hjust = 0.5), 
+                                   axis.text.y = element_text(colour = "black", face="bold", size = 10), 
+                                   legend.text = element_text(size = 18, colour ="black", face = "bold"), 
+                                   legend.title = element_text(size = 20, face = "bold"), 
+                                   panel.background = element_blank(), panel.border = element_rect(colour = "black", fill = NA, size = 1.2), 
+                                   legend.position = "right")
+
+
+# Water Samples:
+waterunk.heat <- ggplot(waterdataunk.com, aes(x = Sample, y = Tax)) + geom_tile(aes(fill = Abundance))
+waterunk.heat <- waterunk.heat + theme(legend.key=element_blank(), 
+                                       axis.text.x = element_text(colour = "black", size = 14, face = "bold", angle = -40, vjust = 0.3, hjust = 0.5), 
+                                       axis.text.y = element_text(colour = "black", face="bold", size = 10), 
+                                       legend.text = element_text(size = 18, colour ="black", face = "bold"), 
+                                       legend.title = element_text(size = 20, face = "bold"), 
+                                       panel.background = element_blank(), panel.border = element_rect(colour = "black", fill = NA, size = 1.2), 
+                                       legend.position = "right")
+waterunk.heat
+
