@@ -149,7 +149,7 @@ plot_richness(ASV_physeq, x="Island", color="Family", shape= "Depth", measures=c
   scale_color_manual(values=Colors) +
   geom_point(size=2.5) + theme_bw()+
   theme(legend.title = element_blank())
-plot_richness(ASV_physeq_MHI, x="Native_Invasive", measures=c("Chao1","Shannon"), color="Family") + scale_color_manual(values=Colors) + theme_bw()
+plot_richness(ASV_physeq_NWHI, x="Native_Invasive", measures=c("Chao1","Shannon"), color="Family") + scale_color_manual(values=Colors) + theme_bw()
 
 deseq_counts <- DESeqDataSetFromMatrix(count_tab, colData=sample_info_tab, design= ~ 1)
 deseq_counts_vst <- varianceStabilizingTransformation(deseq_counts)
@@ -186,7 +186,7 @@ eigen_vals <- vst_pcoa$values$Eigenvalues # allows us to scale the axes accordin
 vst_pcoa
 
 plot_ordination(vst_physeq, vst_pcoa, color="Color") + 
-  geom_point(size=1) + labs(col="sample_info_tab_MHI$Phylum") + geom_text(aes(label=sample_info_tab$Identification), hjust=0.3, vjust=-0.4)+ 
+  geom_point(size=1) + labs(col="sample_info_tab_NWHI$Phylum") + geom_text(aes(label=sample_info_tab$Identification), hjust=0.3, vjust=-0.4)+ 
   ggtitle("PCoA at NWHI") + theme_bw() +
   scale_color_manual(values=unique(sample_info_tab$Color[order(sample_info_tab$Color)])) + theme(legend.position="none") +
   stat_ellipse(type = "norm", linetype= 1)
